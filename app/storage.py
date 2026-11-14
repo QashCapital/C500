@@ -62,7 +62,7 @@ class Store:
             """)
 
     def insert_tick(self, symbol: str, epoch: int, quote: float,
-                    pip_size: int | None, source: str = "live"):
+                    pip_size: float | None, source: str = "live"):
         with self.connect() as c:
             cur = c.execute(
                 "INSERT INTO ticks(symbol,epoch,quote,pip_size,source) VALUES(?,?,?,?,?)",
@@ -71,7 +71,7 @@ class Store:
             return cur.lastrowid
 
     def insert_history_ticks(self, symbol: str, times: Iterable[int],
-                             prices: Iterable[float], pip_size: int | None):
+                             prices: Iterable[float], pip_size: float | None):
         inserted_rows = []
         with self.connect() as c:
             for epoch, quote in zip(times, prices):

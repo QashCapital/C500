@@ -11,14 +11,14 @@ class TickResearch:
         self.moves = deque(maxlen=self.window)
         self.previous = None
 
-    def update(self, quote: float, pip_size: int | None):
+    def update(self, quote: float, pip_size: float | None):
         quote = float(quote)
         result = None
         if self.previous is not None:
             move = quote - self.previous
             if len(self.moves) >= 50:
                 baseline = median(abs(x) for x in self.moves)
-                pip_floor = (10 ** (-int(pip_size))) * self.min_spike_pips if pip_size is not None else 0.0
+                pip_floor = float(pip_size) * self.min_spike_pips if pip_size is not None else 0.0
                 threshold = max(baseline * self.multiplier, pip_floor)
                 if move < -threshold:
                     result = {

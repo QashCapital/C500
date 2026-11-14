@@ -36,27 +36,64 @@ class DerivCollector:
                 return msg
         raise TimeoutError(f"Deriv request {req_id} timed out")
 
+    @staticmethod
+    def _normalise_symbol_text(value):
+        return "".join(ch for ch in str(value or "").lower() if ch.isalnum())
+
     async def _resolve_symbol(self, ws):
         self._req_id += 1
         rid = self._req_id
         await self._send(ws, {"active_symbols": "full", "req_id": rid})
         response = await self._receive_until(ws, rid)
         symbols = response.get("active_symbols", [])
-        target = settings.symbol_name.strip().lower()
-        matches = [
-            item for item in symbols
-            if str(item.get("display_name", "")).strip().lower() == target
-            or str(item.get("symbol", "")).strip().lower() == target.replace(" ", "")
-        ]
+        if not isinstance(symbols, list):
+            raise RuntimeError(
+                "Deriv active_symbols response did not contain a list; "
+                f"response keys={list(response.keys())}"
+            )
+
+        target = self._normalise_symbol_text(settings.symbol_name)
+        matches = []
+        for item in symbols:
+            # The current Deriv API renamed legacy fields:
+            # symbol -> underlying_symbol, display_name -> underlying_symbol_name,
+            # pip -> pip_size. Keep legacy aliases for backward compatibility.
+            display = (item.get("underlying_symbol_name") or item.get("display_name")
+                       or item.get("name") or "")
+            code = item.get("underlying_symbol") or item.get("symbol") or ""
+            display_norm = self._normalise_symbol_text(display)
+            code_norm = self._normalise_symbol_text(code)
+            if display_norm == target or code_norm == target:
+                matches.append(item)
+
         if not matches:
-            candidates = [
-                {"display_name": x.get("display_name"), "symbol": x.get("symbol")}
-                for x in symbols
-                if "crash 500" in str(x.get("display_name", "")).lower()
+            candidates = []
+            for item in symbols:
+                display = (item.get("underlying_symbol_name") or item.get("display_name")
+                           or item.get("name"))
+                code = item.get("underlying_symbol") or item.get("symbol")
+                if "crash500" in self._normalise_symbol_text(display) or "crash500" in self._normalise_symbol_text(code):
+                    candidates.append({"display_name": display, "symbol": code})
+            sample = [
+                {
+                    "display_name": x.get("underlying_symbol_name") or x.get("display_name"),
+                    "symbol": x.get("underlying_symbol") or x.get("symbol")
+                }
+                for x in symbols[:5]
             ]
-            raise RuntimeError(f"Could not resolve '{settings.symbol_name}'. Crash 500 candidates: {candidates}")
+            raise RuntimeError(
+                f"Could not resolve '{settings.symbol_name}'. "
+                f"Crash 500 candidates: {candidates}; active_symbols_count={len(symbols)}; sample={sample}"
+            )
+
         item = matches[0]
-        return item.get("symbol"), item.get("display_name"), item.get("pip")
+        symbol = item.get("underlying_symbol") or item.get("symbol")
+        display = (item.get("underlying_symbol_name") or item.get("display_name")
+                   or item.get("name") or settings.symbol_name)
+        pip_size = item.get("pip_size", item.get("pip"))
+        if not symbol:
+            raise RuntimeError(f"Resolved Crash 500 entry has no symbol identifier: {item}")
+        return symbol, display, float(pip_size) if pip_size is not None else None
 
     async def _seed_history(self, ws, symbol, pip_size):
         self._req_id += 1
