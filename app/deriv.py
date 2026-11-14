@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import time
-from collections import deque
 
 import websockets
 
@@ -24,6 +23,14 @@ class DerivCollector:
 
     async def _send(self, ws, payload):
         await ws.send(json.dumps(payload))
+
+    async def _keepalive(self, ws, interval=30):
+        """Send Deriv application-level pings; protocol ping frames are not enough."""
+        while True:
+            await asyncio.sleep(interval)
+            self._req_id += 1
+            await self._send(ws, {"ping": 1, "req_id": self._req_id})
+            log.debug("Sent Deriv application-level keepalive ping req_id=%s", self._req_id)
 
     async def _receive_until(self, ws, req_id, timeout=20):
         deadline = time.monotonic() + timeout
@@ -119,6 +126,7 @@ class DerivCollector:
 
     async def run_forever(self):
         while True:
+            keepalive_task = None
             try:
                 async with websockets.connect(
                     settings.deriv_ws_url,
@@ -127,10 +135,15 @@ class DerivCollector:
                     close_timeout=10,
                     max_size=2**20
                 ) as ws:
-                    self.connected = True
+                    self.connected = False
                     self.last_error = None
                     self.last_message_at = int(time.time())
-                    self.store.set_state("connection", "connected")
+                    self.store.set_state("connection", "connecting")
+                    # Deriv closes idle application sessions at about two minutes.
+                    # Start JSON/API pings immediately; websocket protocol pings alone
+                    # do not satisfy Deriv's application-level keepalive requirement.
+                    keepalive_task = asyncio.create_task(self._keepalive(ws, interval=30))
+
                     symbol, display, pip_size = await self._resolve_symbol(ws)
                     self.symbol, self.symbol_display = symbol, display
                     from .research import TickResearch
@@ -145,19 +158,31 @@ class DerivCollector:
                     await self._send(ws, {"ticks": symbol, "subscribe": 1, "req_id": self._req_id})
                     self.store.set_state("resolved_symbol", symbol)
                     self.store.set_state("display_name", display)
-                    log.info("Subscribed to %s (%s)", display, symbol)
+                    self.store.set_state("live_ticks_this_connection", "0")
+                    self.store.set_state("connection", "subscribed_waiting_for_ticks")
+                    self.connected = True
+                    log.info("Tick subscription request sent for %s (%s)", display, symbol)
 
                     async for raw in ws:
                         msg = json.loads(raw)
                         self.last_message_at = int(time.time())
+                        msg_type = msg.get("msg_type")
                         if msg.get("error"):
                             raise RuntimeError(msg["error"].get("message", str(msg["error"])))
-                        if msg.get("msg_type") != "tick":
+                        if msg_type == "ping":
+                            continue
+                        if msg_type != "tick":
+                            # Log non-tick responses so subscription acknowledgements
+                            # and unexpected server messages are visible in Railway.
+                            log.debug("Deriv message received: msg_type=%s keys=%s", msg_type, list(msg.keys()))
                             continue
                         tick = msg.get("tick", {})
-                        epoch = int(tick.get("epoch", time.time()))
+                        if "quote" not in tick or "epoch" not in tick:
+                            log.warning("Ignoring malformed Deriv tick message: %s", msg)
+                            continue
+                        epoch = int(tick["epoch"])
                         quote = float(tick["quote"])
-                        pip = tick.get("pip_size", pip_size)
+                        pip = tick.get("pip_size", msg.get("pip_size", pip_size))
                         self.store.insert_tick(symbol, epoch, quote, pip, "live")
                         for tf in (60, 300, 900, 3600):
                             self.store.upsert_candle(symbol, tf, epoch, quote)
@@ -169,6 +194,11 @@ class DerivCollector:
                             )
                         self.store.set_state("last_tick_epoch", str(epoch))
                         self.store.set_state("last_tick_quote", str(quote))
+                        self.store.set_state("connection", "live")
+                        count = int(self.store.get_state().get("live_ticks_this_connection", "0")) + 1
+                        self.store.set_state("live_ticks_this_connection", str(count))
+                        if count == 1 or count % 100 == 0:
+                            log.info("Live Crash 500 ticks received=%s latest_quote=%s epoch=%s", count, quote, epoch)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -180,3 +210,9 @@ class DerivCollector:
                 await asyncio.sleep(settings.reconnect_seconds)
             finally:
                 self.connected = False
+                if keepalive_task:
+                    keepalive_task.cancel()
+                    try:
+                        await keepalive_task
+                    except asyncio.CancelledError:
+                        pass
