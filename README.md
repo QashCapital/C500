@@ -8,6 +8,7 @@ It does **not** place trades, buy contracts, sell contracts, or access account b
 - Resolves the exact Crash 500 symbol dynamically through `active_symbols`.
 - Requests a configurable historical tick seed.
 - Subscribes to live ticks.
+- Sends Deriv application-level JSON keepalive pings every 30 seconds (in addition to WebSocket protocol pings).
 - Stores history and live ticks in SQLite on the Railway persistent volume.
 - Builds M1, M5, M15 and H1 OHLC candles from ticks.
 - Flags unusually large one-tick downside moves as **spike candidates** using a rolling baseline.
