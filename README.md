@@ -16,6 +16,8 @@ It does **not** place trades, buy contracts, sell contracts, or access account b
 Spike candidates are descriptive statistical flags, not confirmed labels, trade signals, or predictions.
 The detector requires a minimum warm-up sample and its parameters must be calibrated against actual stored data.
 
+The collector supports both the current Deriv symbol field names (`underlying_symbol`, `underlying_symbol_name`, `pip_size`) and legacy aliases (`symbol`, `display_name`, `pip`).
+
 ## Railway deployment
 1. Create a **new** Railway project/service from this folder or its GitHub repository.
 2. Attach a persistent volume to the service at `/app/data`.
